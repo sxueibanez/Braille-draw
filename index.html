@@ -17,6 +17,11 @@
     .group { display: flex; align-items: end; gap: 8px; }
     label { display: grid; gap: 4px; color: #737784; font-size: 12px; }
     input { width: 76px; height: 38px; border: 1px solid #dfe1e7; border-radius: 8px; padding: 0 10px; font: inherit; }
+    .image-controls { margin-top: 12px; }
+    .image-controls input[type="file"] { width: min(100%, 290px); height: auto; padding: 6px 0; border: 0; border-radius: 0; }
+    .image-controls input[type="range"] { width: 160px; padding: 0; }
+    .check-label { display: flex; align-items: center; height: 38px; gap: 6px; font-size: 15px; color: inherit; }
+    .check-label input { width: 16px; height: 16px; margin: 0; }
     select { height: 38px; border: 1px solid #dfe1e7; border-radius: 8px; background: white; padding: 0 10px; font: inherit; }
     button { height: 38px; border: 1px solid #dfe1e7; border-radius: 8px; background: white; color: inherit; padding: 0 13px; font: inherit; cursor: pointer; }
     button:disabled { opacity: .45; cursor: not-allowed; }
@@ -101,6 +106,22 @@
       <div class="status" id="status" role="status" aria-live="polite"></div>
     </section>
 
+    <section aria-labelledby="image-heading">
+      <h2 id="image-heading">图片转点阵</h2>
+      <div class="toolbar image-controls">
+        <label>选择图片<input id="image-file" type="file" accept="image/*"></label>
+        <label><span>明暗阈值：<output id="image-threshold-value" for="image-threshold">160</output></span>
+          <input id="image-threshold" type="range" min="0" max="255" value="160">
+        </label>
+        <label><span>图片大小：<output id="image-scale-value" for="image-scale">100%</output></span>
+          <input id="image-scale" type="range" min="10" max="200" step="5" value="100">
+        </label>
+        <label class="check-label"><input id="image-invert" type="checkbox">反色</label>
+        <button id="image-convert" type="button" disabled>重新转换</button>
+      </div>
+      <p class="hint">选择图片后自动按比例转换到当前画布。大小滑块可等比缩放，100% 为适合画布，超出画布的部分会裁切；松开阈值滑块或切换反色可调整效果。转换会替换画布，可撤销；图片仅在本地处理。</p>
+    </section>
+
     <section class="workspace">
       <div class="canvas-wrap">
         <div class="canvas-stage">
@@ -133,8 +154,99 @@
     const preview = document.querySelector("#preview");
     const output = document.querySelector("#output");
     const status = document.querySelector("#status");
+    const imageThreshold = document.querySelector("#image-threshold");
+    const imageScale = document.querySelector("#image-scale");
+    const imageInvert = document.querySelector("#image-invert");
+    const imageConvert = document.querySelector("#image-convert");
     let width = 48, height = 20, zoom = 1, pixels = new Uint8Array(width * height);
     let undoStack = [], redoStack = [], mode = "draw", stroke = null, shapeFilled = false;
+    let sourceImage = null, imageLoadId = 0, imageScaleBefore = null;
+
+    function imageDataToPixels(data, columns, rows, threshold, inverted) {
+      const result = new Uint8Array(columns * rows), dotWidth = columns * 2;
+      for (let y = 0; y < rows * 4; y++) for (let x = 0; x < dotWidth; x++) {
+        const i = (y * dotWidth + x) * 4, alpha = data[i + 3] / 255;
+        if (!alpha) continue;
+        const brightness = (2126 * data[i] + 7152 * data[i + 1] + 722 * data[i + 2]) / 10000 * alpha + 255 * (1 - alpha);
+        if (inverted ? brightness >= threshold : brightness < threshold) {
+          result[Math.floor(y / 4) * columns + Math.floor(x / 2)] |= bits[y % 4][x % 2];
+        }
+      }
+      return result;
+    }
+    function convertImportedImage(image = sourceImage, recordHistory = true) {
+      if (!image) return false;
+      try {
+        const bitmap = document.createElement("canvas");
+        bitmap.width = width * 2; bitmap.height = height * 4;
+        const context = bitmap.getContext("2d");
+        if (!context) throw new Error("无法创建图片画布");
+        const rect = canvas.getBoundingClientRect();
+        const scale = Math.min(rect.width / image.naturalWidth, rect.height / image.naturalHeight) * Number(imageScale.value) / 100;
+        const drawWidth = image.naturalWidth * scale / rect.width * bitmap.width;
+        const drawHeight = image.naturalHeight * scale / rect.height * bitmap.height;
+        context.imageSmoothingQuality = "high";
+        context.drawImage(image, (bitmap.width - drawWidth) / 2, (bitmap.height - drawHeight) / 2, drawWidth, drawHeight);
+        const converted = imageDataToPixels(context.getImageData(0, 0, bitmap.width, bitmap.height).data, width, height, Number(imageThreshold.value), imageInvert.checked);
+        finishStroke();
+        if (pixels.some((value, i) => value !== converted[i])) {
+          if (recordHistory) {
+            remember(undoStack, pixels.slice());
+            redoStack = [];
+          }
+          pixels = converted;
+        }
+        renderAll();
+        status.textContent = "图片已转换为点阵，可继续绘制、复制或下载，也可撤销恢复原画布。";
+        return true;
+      } catch {
+        status.textContent = "图片转换失败，请尝试其他图片或更小的图片。";
+        return false;
+      }
+    }
+    document.querySelector("#image-file").addEventListener("change", async event => {
+      const file = event.currentTarget.files[0];
+      if (!file) return;
+      const request = ++imageLoadId, url = URL.createObjectURL(file);
+      imageConvert.disabled = true;
+      status.textContent = "正在读取并转换图片…";
+      try {
+        const image = new Image();
+        image.src = url;
+        await image.decode();
+        if (request !== imageLoadId) return;
+        if (convertImportedImage(image)) sourceImage = image;
+      } catch {
+        if (request === imageLoadId) status.textContent = "无法读取这张图片，请选择 PNG、JPEG 或其他浏览器支持的图片。";
+      } finally {
+        URL.revokeObjectURL(url);
+        if (request === imageLoadId) imageConvert.disabled = !sourceImage;
+      }
+    });
+    imageThreshold.addEventListener("input", () => {
+      document.querySelector("#image-threshold-value").value = imageThreshold.value;
+    });
+    imageThreshold.addEventListener("change", () => convertImportedImage());
+    imageScale.addEventListener("input", () => {
+      document.querySelector("#image-scale-value").value = `${imageScale.value}%`;
+      if (!sourceImage) return;
+      if (!imageScaleBefore) {
+        finishStroke();
+        imageScaleBefore = pixels.slice();
+      }
+      convertImportedImage(sourceImage, false);
+    });
+    imageScale.addEventListener("change", () => {
+      if (!imageScaleBefore) return;
+      if (imageScaleBefore.some((value, i) => value !== pixels[i])) {
+        remember(undoStack, imageScaleBefore);
+        redoStack = [];
+        renderHistoryButtons();
+      }
+      imageScaleBefore = null;
+    });
+    imageInvert.addEventListener("change", () => convertImportedImage());
+    imageConvert.addEventListener("click", () => convertImportedImage());
 
     function charAt(i) { return String.fromCodePoint(base + pixels[i]); }
     function textArt() {

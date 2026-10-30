@@ -119,7 +119,7 @@
         <label class="check-label"><input id="image-invert" type="checkbox">反色</label>
         <button id="image-convert" type="button" disabled>重新转换</button>
       </div>
-      <p class="hint">选择图片后自动按比例转换到当前画布。大小滑块可等比缩放，100% 为适合画布，超出画布的部分会裁切；松开阈值滑块或切换反色可调整效果。转换会替换画布，可撤销；图片仅在本地处理。</p>
+      <p class="hint">选择图片或按 Ctrl+V 粘贴剪贴板图片后自动转换。大小滑块可等比缩放，100% 为适合画布，超出画布的部分会裁切；松开阈值滑块或切换反色可调整效果。转换会替换画布，可撤销；图片仅在本地处理。</p>
     </section>
 
     <section class="workspace">
@@ -204,8 +204,7 @@
         return false;
       }
     }
-    document.querySelector("#image-file").addEventListener("change", async event => {
-      const file = event.currentTarget.files[0];
+    async function loadImage(file) {
       if (!file) return;
       const request = ++imageLoadId, url = URL.createObjectURL(file);
       imageConvert.disabled = true;
@@ -222,6 +221,14 @@
         URL.revokeObjectURL(url);
         if (request === imageLoadId) imageConvert.disabled = !sourceImage;
       }
+    }
+    document.querySelector("#image-file").addEventListener("change", event => loadImage(event.currentTarget.files[0]));
+    document.addEventListener("paste", event => {
+      const item = Array.from(event.clipboardData?.items || []).find(item => item.kind === "file" && item.type.startsWith("image/"));
+      const file = item?.getAsFile();
+      if (!file) return;
+      event.preventDefault();
+      return loadImage(file);
     });
     imageThreshold.addEventListener("input", () => {
       document.querySelector("#image-threshold-value").value = imageThreshold.value;
